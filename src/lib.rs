@@ -4,7 +4,7 @@ use std::str::FromStr;
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
-use syn::{Data, DataEnum, DataStruct, DeriveInput, Expr, Ident, Lit, LitInt, Type, Attribute};
+use syn::{Attribute, Data, DataEnum, DataStruct, DeriveInput, Expr, Ident, Lit, LitInt, Type};
 
 fn serialize_struct(ident: Ident, s: DataStruct) -> TokenStream2 {
     let attrs: Vec<Ident> = s
@@ -74,7 +74,7 @@ fn deserialize_struct(ident: Ident, s: DataStruct) -> TokenStream2 {
                 Some(
                     Self {
                         #(
-                            #attrs: #types::deserialize(data[#cursors_a..#cursors_b].try_into().unwrap())?
+                            #attrs: #types::deserialize(data[#cursors_a..#cursors_b].try_into().ok()?)?
                         ),*
                     }
                 )
