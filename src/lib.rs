@@ -27,12 +27,12 @@ fn serialize_struct(ident: Ident, s: DataStruct) -> TokenStream2 {
 
     quote! {
         impl _TinySerSized for #ident {
-            const SIZE: usize = {#( <#types as _TinySerSized>::SIZE )+*};
+            const SIZE: usize = #( <#types as _TinySerSized>::SIZE )+*;
         }
 
-        impl Serialize<{<#ident as _TinySerSized>::SIZE}> for #ident {
-            fn serialize(self) -> [u8; {<#ident as _TinySerSized>::SIZE}] {
-                let mut result = [0u8; {<#ident as _TinySerSized>::SIZE}];
+        impl Serialize<<#ident as _TinySerSized>::SIZE> for #ident {
+            fn serialize(self) -> [u8; <#ident as _TinySerSized>::SIZE] {
+                let mut result = [0u8; <#ident as _TinySerSized>::SIZE];
 
                 #(
                     let data = self.#attrs.serialize();
@@ -66,11 +66,11 @@ fn deserialize_struct(ident: Ident, s: DataStruct) -> TokenStream2 {
 
     quote! {
         impl _TinyDeSized for #ident {
-            const SIZE: usize = {#( <#types as _TinyDeSized>::SIZE )+*};
+            const SIZE: usize = #( <#types as _TinyDeSized>::SIZE )+*;
         }
 
-        impl Deserialize<{<#ident as _TinyDeSized>::SIZE}> for #ident {
-            fn deserialize(data: [u8; {<#ident as _TinyDeSized>::SIZE}]) -> Option<Self> {
+        impl Deserialize<<#ident as _TinyDeSized>::SIZE> for #ident {
+            fn deserialize(data: [u8; <#ident as _TinyDeSized>::SIZE]) -> Option<Self> {
                 Some(
                     Self {
                         #(
@@ -183,7 +183,7 @@ fn serialize_enum(ident: Ident, repr: Type, e: DataEnum) -> TokenStream2 {
             };
         }
 
-        impl Serialize<{<#ident as _TinySerSized>::SIZE}> for #ident {
+        impl Serialize<<#ident as _TinySerSized>::SIZE> for #ident {
             fn serialize(self) -> [u8; <Self as _TinySerSized>::SIZE] {
                 let mut result = [0u8; <Self as _TinySerSized>::SIZE];
 
@@ -241,7 +241,7 @@ fn deserialize_enum(ident: Ident, repr: Type, e: DataEnum) -> TokenStream2 {
             };
         }
 
-        impl Deserialize<{<#ident as _TinyDeSized>::SIZE}> for #ident {
+        impl Deserialize<<#ident as _TinyDeSized>::SIZE> for #ident {
             fn deserialize(data: [u8; <Self as _TinyDeSized>::SIZE]) -> Option<Self> {
                 let tag = #repr::deserialize(data[..<#repr as _TinyDeSized>::SIZE].try_into().unwrap())?;
 
