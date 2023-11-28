@@ -3,8 +3,8 @@ use std::str::FromStr;
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
-use quote::quote;
-use syn::{Attribute, Data, DataEnum, DataStruct, DeriveInput, Expr, Ident, Lit, LitInt, Type};
+use quote::{format_ident, quote};
+use syn::{Attribute, Data, DataEnum, DataStruct, DeriveInput, Fields, Ident, Type};
 
 fn serialize_struct(ident: Ident, s: DataStruct) -> TokenStream2 {
     let attrs: Vec<Ident> = s
@@ -74,7 +74,7 @@ fn deserialize_struct(ident: Ident, s: DataStruct) -> TokenStream2 {
                 Some(
                     Self {
                         #(
-                            #attrs: #types::deserialize(data[#cursors_a..#cursors_b].try_into().ok()?)?
+                            #attrs: #types::deserialize(data[#cursors_a..#cursors_b].try_into().unwrap())?
                         ),*
                     }
                 )
@@ -83,68 +83,175 @@ fn deserialize_struct(ident: Ident, s: DataStruct) -> TokenStream2 {
     }
 }
 
-fn serialize_enum(ident: Ident, ty: Type) -> TokenStream2 {
+struct VariantTokenGroups(
+    Vec<Ident>,
+    Vec<TokenStream2>,
+    Vec<Option<TokenStream2>>,
+    Vec<TokenStream2>,
+);
+
+fn build_variant_token_groups(e: DataEnum) -> VariantTokenGroups {
+    let mut variant_idents = Vec::new();
+    let mut tags = Vec::new();
+    let mut associated_types = Vec::new();
+    let mut i = 0; // count up by one starting at any known tag
+    let mut last_anchor = quote! { 0 };
+
+    for variant in e.variants.iter() {
+        let ident = variant.ident.clone();
+
+        if let Some((_, tag)) = &variant.discriminant {
+            // a literal tag is provided, restart counter and update as last anchor
+            let tokens = quote! { #tag };
+            tags.push(tokens.clone());
+            i = 0;
+            last_anchor = tokens;
+        } else {
+            // a tag was not explicitly provided, we need to count up from last anchor
+            let rendered_offset = TokenStream2::from_str(&i.to_string()).unwrap();
+            tags.push(quote! { #last_anchor + #rendered_offset });
+        }
+        i += 1;
+
+        match &variant.fields {
+            Fields::Named(_named) => {
+                panic!("Struct variants are not supported yet.")
+            }
+            Fields::Unnamed(unnamed) => {
+                assert_eq!(
+                    unnamed.unnamed.iter().len(),
+                    1,
+                    "Tuple variants cannot hold more than one type yet."
+                );
+
+                let ty = unnamed
+                    .unnamed
+                    .iter()
+                    .next()
+                    .expect("Tuple variant must contain at least one type.");
+
+                associated_types.push(Some(quote! { #ty }));
+            }
+            Fields::Unit => {
+                associated_types.push(None);
+            }
+        }
+
+        variant_idents.push(ident);
+    }
+
+    let filtered_types: Vec<TokenStream2> = associated_types
+        .iter()
+        .cloned()
+        .filter_map(|ty| ty)
+        .collect();
+
+    VariantTokenGroups(variant_idents, tags, associated_types, filtered_types)
+}
+
+fn serialize_enum(ident: Ident, repr: Type, e: DataEnum) -> TokenStream2 {
+    let VariantTokenGroups(variant_idents, tags, associated_types, filtered_types) =
+        build_variant_token_groups(e);
+
+    let ser_types = associated_types
+        .iter()
+        .cloned()
+        .map(|maybe_ty|
+            maybe_ty.and_then(
+                |ty|
+                Some(quote! { result[<#repr as _TinySerSized>::SIZE..<#repr as _TinySerSized>::SIZE + <#ty as _TinySerSized>::SIZE].copy_from_slice(&value.serialize()); })
+            )
+        );
+
+    let type_captures = associated_types
+        .iter()
+        .cloned()
+        .map(|maybe_ty| maybe_ty.and_then(|_ty| Some(quote! { (value) })));
+
     quote! {
         impl _TinySerSized for #ident {
-            const SIZE: usize = {<#ty as _TinySerSized>::SIZE};
+            const SIZE: usize = {
+                let mut max = 0;
+
+                #(
+                    if <#filtered_types as _TinySerSized>::SIZE > max {
+                        max = <#filtered_types as _TinySerSized>::SIZE;
+                    }
+                )*
+
+                max + <#repr as _TinySerSized>::SIZE
+            };
         }
 
         impl Serialize<{<#ident as _TinySerSized>::SIZE}> for #ident {
-            fn serialize(self) -> [u8; {<#ident as _TinySerSized>::SIZE}] {
-                (self as #ty).serialize()
+            fn serialize(self) -> [u8; <Self as _TinySerSized>::SIZE] {
+                let mut result = [0u8; <Self as _TinySerSized>::SIZE];
+
+                match self {
+                    #(
+                        Self::#variant_idents #type_captures => {
+                            result[..<#repr as _TinySerSized>::SIZE].copy_from_slice(&((#tags) as #repr).serialize());
+                            #ser_types
+                        }
+                    )*
+                }
+
+                result
             }
         }
     }
 }
 
-fn deserialize_enum(ident: Ident, ty: Type, e: DataEnum) -> TokenStream2 {
-    let idents: Vec<Ident> = e
-        .variants
+fn deserialize_enum(ident: Ident, repr: Type, e: DataEnum) -> TokenStream2 {
+    let VariantTokenGroups(variant_idents, tags, associated_types, filtered_types) =
+        build_variant_token_groups(e);
+
+    let tag_consts: Vec<Ident> = variant_idents
         .iter()
-        .map(|variant| variant.ident.clone())
-        .collect();
-    let discriminants: Vec<TokenStream2> = e
-        .variants
-        .iter()
-        .scan(0isize, |acc, variant| {
-            Some(if let Some((_, value)) = variant.discriminant.clone() {
-                match value {
-                    Expr::Lit(lit) => match lit.lit {
-                        Lit::Int(int) => {
-                            *acc = int.base10_parse().unwrap();
-                            *acc
-                        }
-                        _ => {
-                            panic!("Only integer discriminants are supported for now.")
-                        }
-                    },
-                    _ => {
-                        panic!("Discriminant must be a literal.")
-                    }
-                }
-            } else {
-                *acc += 1;
-                acc.clone()
-            })
-        })
-        .map(|value| {
-            let lit: LitInt = syn::parse2(quote! { #value }).unwrap();
-            TokenStream2::from_str(lit.base10_digits()).unwrap()
+        .map(|ident| {
+            format_ident!(
+                "{}_TAG",
+                inflector::cases::screamingsnakecase::to_screaming_snake_case(&ident.to_string())
+            )
         })
         .collect();
+
+    let deser_types = associated_types
+        .iter()
+        .cloned()
+        .map(|maybe_ty|
+            maybe_ty.and_then(
+                |ty|
+                Some(quote! { (#ty::deserialize(data[<#repr as _TinyDeSized>::SIZE..<#repr as _TinyDeSized>::SIZE + <#ty as _TinyDeSized>::SIZE].try_into().unwrap())?) })
+            )
+        );
 
     quote! {
         impl _TinyDeSized for #ident {
-            const SIZE: usize = {<#ty as _TinyDeSized>::SIZE};
+            const SIZE: usize = {
+                let mut max = 0;
+
+                #(
+                    if <#filtered_types as _TinyDeSized>::SIZE > max {
+                        max = <#filtered_types as _TinyDeSized>::SIZE;
+                    }
+                )*
+
+                max + <#repr as _TinyDeSized>::SIZE
+            };
         }
 
-        impl Deserialize<{<#ty as _TinyDeSized>::SIZE}> for #ident {
-            fn deserialize(data: [u8; {<#ty as _TinyDeSized>::SIZE}]) -> Option<Self> {
-                let repr = #ty::deserialize(data)?;
+        impl Deserialize<{<#ident as _TinyDeSized>::SIZE}> for #ident {
+            fn deserialize(data: [u8; <Self as _TinyDeSized>::SIZE]) -> Option<Self> {
+                let tag = #repr::deserialize(data[..<#repr as _TinyDeSized>::SIZE].try_into().unwrap())?;
 
-                match repr {
+                #(
+                    const #tag_consts: #repr = #tags;
+                )*
+
+                match tag {
                     #(
-                        #discriminants => Some(Self::#idents),
+                        #tag_consts => Some(Self::#variant_idents #deser_types),
                     )*
                     _ => None
                 }
@@ -165,10 +272,10 @@ fn get_repr(attrs: Vec<Attribute>) -> Type {
 fn impl_serialize(body: DeriveInput) -> TokenStream2 {
     match body.data {
         Data::Struct(s) => serialize_struct(body.ident, s),
-        Data::Enum(_) => {
+        Data::Enum(e) => {
             let ty = get_repr(body.attrs);
 
-            serialize_enum(body.ident, ty)
+            serialize_enum(body.ident, ty, e)
         }
         Data::Union(_) => panic!("#[derive(Serialize)] does not support union types."),
     }
