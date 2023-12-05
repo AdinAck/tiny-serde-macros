@@ -167,15 +167,19 @@ fn serialize_enum(ident: Ident, repr: Type, e: DataEnum) -> TokenStream2 {
             maybe_field.and_then(
                 |field| {
                     let ty = field.ty;
-                    Some(quote! { result[<#repr as _TinySerSized>::SIZE..<#repr as _TinySerSized>::SIZE + <#ty as _TinySerSized>::SIZE].copy_from_slice(&value.serialize()); })
+                    if let Some(ident) = field.ident {
+                        Some(quote! { result[<#repr as _TinySerSized>::SIZE..<#repr as _TinySerSized>::SIZE + <#ty as _TinySerSized>::SIZE].copy_from_slice(&#ident.serialize()); })
+                    } else {
+                        Some(quote! { result[<#repr as _TinySerSized>::SIZE..<#repr as _TinySerSized>::SIZE + <#ty as _TinySerSized>::SIZE].copy_from_slice(&value.serialize()); })
+                    }
                 }
             )
         );
 
     let type_captures = associated_fields.iter().cloned().map(|maybe_field| {
         maybe_field.and_then(|field| {
-            if let Some(_ident) = field.ident {
-                Some(quote! { { value } })
+            if let Some(ident) = field.ident {
+                Some(quote! { { #ident } })
             } else {
                 Some(quote! { (value) })
             }
@@ -237,7 +241,11 @@ fn deserialize_enum(ident: Ident, repr: Type, e: DataEnum) -> TokenStream2 {
             maybe_field.and_then(
                 |field| {
                     let ty = field.ty;
-                    Some(quote! { (#ty::deserialize(data[<#repr as _TinyDeSized>::SIZE..<#repr as _TinyDeSized>::SIZE + <#ty as _TinyDeSized>::SIZE].try_into().unwrap())?) })
+                    if let Some(ident) = field.ident {
+                        Some(quote! { {#ident: #ty::deserialize(data[<#repr as _TinyDeSized>::SIZE..<#repr as _TinyDeSized>::SIZE + <#ty as _TinyDeSized>::SIZE].try_into().unwrap())?} })
+                    } else {
+                        Some(quote! { (#ty::deserialize(data[<#repr as _TinyDeSized>::SIZE..<#repr as _TinyDeSized>::SIZE + <#ty as _TinyDeSized>::SIZE].try_into().unwrap())?) })
+                    }
                 }
             )
         );
