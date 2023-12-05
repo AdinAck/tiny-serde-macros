@@ -4,7 +4,7 @@ use std::str::FromStr;
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
-use syn::{Attribute, Data, DataEnum, DataStruct, DeriveInput, Fields, Ident, Type};
+use syn::{Attribute, Data, DataEnum, DataStruct, DeriveInput, Field, Fields, Ident, Type};
 
 fn serialize_struct(ident: Ident, s: DataStruct) -> TokenStream2 {
     let attrs: Vec<Ident> = s
@@ -83,17 +83,12 @@ fn deserialize_struct(ident: Ident, s: DataStruct) -> TokenStream2 {
     }
 }
 
-struct VariantTokenGroups(
-    Vec<Ident>,
-    Vec<TokenStream2>,
-    Vec<Option<TokenStream2>>,
-    Vec<TokenStream2>,
-);
+struct VariantTokenGroups(Vec<Ident>, Vec<TokenStream2>, Vec<Option<Field>>, Vec<Type>);
 
 fn build_variant_token_groups(e: DataEnum) -> VariantTokenGroups {
     let mut variant_idents = Vec::new();
     let mut tags = Vec::new();
-    let mut associated_types = Vec::new();
+    let mut associated_fields = Vec::new();
     let mut i = 0; // count up by one starting at any known tag
     let mut last_anchor = quote! { 0 };
 
@@ -114,8 +109,20 @@ fn build_variant_token_groups(e: DataEnum) -> VariantTokenGroups {
         i += 1;
 
         match &variant.fields {
-            Fields::Named(_named) => {
-                panic!("Struct variants are not supported yet.")
+            Fields::Named(named) => {
+                assert_eq!(
+                    named.named.iter().len(),
+                    1,
+                    "Struct variants cannot hold more than one type yet."
+                );
+
+                let ty = named
+                    .named
+                    .iter()
+                    .next()
+                    .expect("Struct variant must contain at least one type.");
+
+                associated_fields.push(Some(ty.clone()));
             }
             Fields::Unnamed(unnamed) => {
                 assert_eq!(
@@ -130,43 +137,50 @@ fn build_variant_token_groups(e: DataEnum) -> VariantTokenGroups {
                     .next()
                     .expect("Tuple variant must contain at least one type.");
 
-                associated_types.push(Some(quote! { #ty }));
+                associated_fields.push(Some(ty.clone()));
             }
             Fields::Unit => {
-                associated_types.push(None);
+                associated_fields.push(None);
             }
         }
 
         variant_idents.push(ident);
     }
 
-    let filtered_types: Vec<TokenStream2> = associated_types
+    let filtered_types: Vec<Type> = associated_fields
         .iter()
         .cloned()
-        .filter_map(|ty| ty)
+        .filter_map(|maybe_field| Some(maybe_field?.ty))
         .collect();
 
-    VariantTokenGroups(variant_idents, tags, associated_types, filtered_types)
+    VariantTokenGroups(variant_idents, tags, associated_fields, filtered_types)
 }
 
 fn serialize_enum(ident: Ident, repr: Type, e: DataEnum) -> TokenStream2 {
-    let VariantTokenGroups(variant_idents, tags, associated_types, filtered_types) =
+    let VariantTokenGroups(variant_idents, tags, associated_fields, filtered_types) =
         build_variant_token_groups(e);
 
-    let ser_types = associated_types
+    let ser_types = associated_fields
         .iter()
         .cloned()
-        .map(|maybe_ty|
-            maybe_ty.and_then(
-                |ty|
-                Some(quote! { result[<#repr as _TinySerSized>::SIZE..<#repr as _TinySerSized>::SIZE + <#ty as _TinySerSized>::SIZE].copy_from_slice(&value.serialize()); })
+        .map(|maybe_field|
+            maybe_field.and_then(
+                |field| {
+                    let ty = field.ty;
+                    Some(quote! { result[<#repr as _TinySerSized>::SIZE..<#repr as _TinySerSized>::SIZE + <#ty as _TinySerSized>::SIZE].copy_from_slice(&value.serialize()); })
+                }
             )
         );
 
-    let type_captures = associated_types
-        .iter()
-        .cloned()
-        .map(|maybe_ty| maybe_ty.and_then(|_ty| Some(quote! { (value) })));
+    let type_captures = associated_fields.iter().cloned().map(|maybe_field| {
+        maybe_field.and_then(|field| {
+            if let Some(_ident) = field.ident {
+                Some(quote! { { value } })
+            } else {
+                Some(quote! { (value) })
+            }
+        })
+    });
 
     quote! {
         impl _TinySerSized for #ident {
@@ -219,10 +233,12 @@ fn deserialize_enum(ident: Ident, repr: Type, e: DataEnum) -> TokenStream2 {
     let deser_types = associated_types
         .iter()
         .cloned()
-        .map(|maybe_ty|
-            maybe_ty.and_then(
-                |ty|
-                Some(quote! { (#ty::deserialize(data[<#repr as _TinyDeSized>::SIZE..<#repr as _TinyDeSized>::SIZE + <#ty as _TinyDeSized>::SIZE].try_into().unwrap())?) })
+        .map(|maybe_field|
+            maybe_field.and_then(
+                |field| {
+                    let ty = field.ty;
+                    Some(quote! { (#ty::deserialize(data[<#repr as _TinyDeSized>::SIZE..<#repr as _TinyDeSized>::SIZE + <#ty as _TinyDeSized>::SIZE].try_into().unwrap())?) })
+                }
             )
         );
 
